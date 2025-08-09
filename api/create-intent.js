@@ -1,22 +1,39 @@
+// api/create-intent.js
 import Stripe from "stripe";
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, { apiVersion: "2024-06-20" });
+
+// Force Node runtime (not Edge)
+export const config = { runtime: "nodejs" };
 
 export default async function handler(req, res) {
+  // Basic CORS for browser calls (Framer)
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS,GET");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+  if (req.method === "OPTIONS") return res.status(200).end();
+
+  const key = process.env.STRIPE_SECRET_KEY || "";
+
+  // Quick debug GET (safe to leave while testing)
   if (req.method === "GET") {
     return res.status(200).json({
       ok: true,
-      hasKey: !!process.env.STRIPE_SECRET_KEY,
-      // mode is safe to reveal; it doesn't leak the key
-      mode: process.env.STRIPE_SECRET_KEY?.startsWith("sk_live_") ? "live" : "test",
-    })
+      hasKey: !!key,
+      prefix: key ? key.slice(0, 7) : null, // e.g., "sk_test" or "sk_live"
+    });
   }
-  if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method not allowed" });
+  }
 
   try {
+    // ⬅️ IMPORTANT: initialize Stripe *inside* the request using the env var
+    const stripe = new Stripe(key, { apiVersion: "2024-06-20" });
+
     const { email = "", name = "", phone = "", amount = 5000, currency = "usd" } = req.body || {};
 
-    // (optional) upsert customer so the lead is saved
+    // (optional) upsert a customer
     let customerId;
     if (email) {
       const existing = await stripe.customers.list({ email, limit: 1 });
@@ -35,11 +52,11 @@ export default async function handler(req, res) {
       customer: customerId,
       automatic_payment_methods: { enabled: true },
       receipt_email: email || undefined,
-      metadata: { email, name, phone, source: "framer" }
+      metadata: { email, name, phone, source: "framer" },
     });
 
-    res.status(200).json({ clientSecret: pi.client_secret });
+    return res.status(200).json({ clientSecret: pi.client_secret });
   } catch (err) {
-    res.status(400).json({ error: err.message });
+    return res.status(400).json({ error: err.message });
   }
 }
