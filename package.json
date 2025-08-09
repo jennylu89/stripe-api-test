@@ -1,5 +1,6 @@
 {
-  "name": "stripe-api-test",
+  "name": "stripe-api-only",
   "version": "1.0.0",
-  "type": "module"
+  "type": "module",
+  "dependencies": { "stripe": "^16.0.0" }
 }
