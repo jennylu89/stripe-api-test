@@ -1,82 +1,71 @@
 // api/create-intent.js
-import Stripe from "stripe";
-
-// Keep Node runtime (not Edge)
-export const config = { runtime: "nodejs" };
+import Stripe from "stripe"
+export const config = { runtime: "nodejs" }
 
 export default async function handler(req, res) {
-  // CORS for browser calls (tighten ALLOW_ORIGIN later)
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS,GET");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  // CORS (tighten Access-Control-Allow-Origin later)
+  res.setHeader("Access-Control-Allow-Origin", "*")
+  res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS,GET")
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type")
+  if (req.method === "OPTIONS") return res.status(200).end()
 
-  if (req.method === "OPTIONS") return res.status(200).end();
-
-  const key = process.env.STRIPE_SECRET_KEY || "";
-
-  // Quick health check (ok to keep while testing)
+  const key = process.env.STRIPE_SECRET_KEY || ""
   if (req.method === "GET") {
-    return res.status(200).json({
-      ok: true,
-      hasKey: !!key,
-      mode: key?.startsWith("sk_live_") ? "live" : "test",
-    });
+    return res.status(200).json({ ok: true, hasKey: !!key })
   }
-
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
-  }
+  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" })
 
   try {
+    const stripe = new Stripe(key, { apiVersion: "2024-06-20" })
+
     const {
       email = "",
       name = "",
       phone = "",
-      // product info from Framer
+      priceId = "",          // <-- pass this for catalog pricing
+      amount,                // <-- optional fallback (cents)
+      currency,              // <-- optional, used only if amount provided
+      productName = "",
       productId = "",
-      productName = "Product",
-      image = "",
-      // price
-      amount = 5000, // cents
-      currency = "usd",
-    } = req.body || {};
+    } = req.body || {}
 
-    if (!Number(amount) || Number(amount) < 1) {
-      return res.status(400).json({ error: "Invalid amount (in cents)" });
-    }
+    // Resolve price → amount/currency from Stripe if priceId is given
+    let finalAmount = Number(amount || 0)
+    let finalCurrency = (currency || "usd").toLowerCase()
 
-    // Initialize Stripe *inside* the handler
-    const stripe = new Stripe(key, { apiVersion: "2024-06-20" });
-
-    // (Optional) upsert a customer so you keep leads if they abandon
-    let customerId;
-    if (email) {
-      const existing = await stripe.customers.list({ email, limit: 1 });
-      if (existing.data[0]) {
-        const u = await stripe.customers.update(existing.data[0].id, { name, phone });
-        customerId = u.id;
-      } else {
-        const c = await stripe.customers.create({ email, name, phone });
-        customerId = c.id;
+    if (priceId) {
+      const price = await stripe.prices.retrieve(priceId)
+      if (!price.unit_amount || !price.currency) {
+        return res.status(400).json({ error: "Price must be unit_amount-based (not metered/tiered)" })
       }
+      finalAmount = price.unit_amount
+      finalCurrency = price.currency
     }
 
-    // Create the PaymentIntent for Payment Element
+    if (!finalAmount || finalAmount < 1) {
+      return res.status(400).json({ error: "Invalid amount" })
+    }
+
+    // Upsert customer (optional but useful)
+    let customerId
+    if (email) {
+      const existing = await stripe.customers.list({ email, limit: 1 })
+      customerId = existing.data[0]
+        ? (await stripe.customers.update(existing.data[0].id, { name, phone })).id
+        : (await stripe.customers.create({ email, name, phone })).id
+    }
+
     const pi = await stripe.paymentIntents.create({
-      amount: Number(amount),
-      currency: String(currency).toLowerCase(),
+      amount: finalAmount,
+      currency: finalCurrency,
       customer: customerId,
       automatic_payment_methods: { enabled: true },
       receipt_email: email || undefined,
-      metadata: {
-        email, name, phone,
-        productId, productName, image,
-        source: "framer-payment-element",
-      },
-    });
+      metadata: { email, name, phone, productId, productName, priceId, source: "framer-payment-element" },
+    })
 
-    return res.status(200).json({ clientSecret: pi.client_secret });
+    return res.status(200).json({ clientSecret: pi.client_secret })
   } catch (err) {
-    return res.status(400).json({ error: err.message });
+    return res.status(400).json({ error: err.message })
   }
 }
