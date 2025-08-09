@@ -1,11 +1,11 @@
 // api/create-intent.js
 import Stripe from "stripe";
 
-// Force Node runtime (not Edge)
+// Keep Node runtime (not Edge)
 export const config = { runtime: "nodejs" };
 
 export default async function handler(req, res) {
-  // Basic CORS for browser calls (Framer)
+  // CORS for browser calls (tighten ALLOW_ORIGIN later)
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS,GET");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -14,12 +14,12 @@ export default async function handler(req, res) {
 
   const key = process.env.STRIPE_SECRET_KEY || "";
 
-  // Quick debug GET (safe to leave while testing)
+  // Quick health check (ok to keep while testing)
   if (req.method === "GET") {
     return res.status(200).json({
       ok: true,
       hasKey: !!key,
-      prefix: key ? key.slice(0, 7) : null, // e.g., "sk_test" or "sk_live"
+      mode: key?.startsWith("sk_live_") ? "live" : "test",
     });
   }
 
@@ -28,12 +28,27 @@ export default async function handler(req, res) {
   }
 
   try {
-    // ⬅️ IMPORTANT: initialize Stripe *inside* the request using the env var
+    const {
+      email = "",
+      name = "",
+      phone = "",
+      // product info from Framer
+      productId = "",
+      productName = "Product",
+      image = "",
+      // price
+      amount = 5000, // cents
+      currency = "usd",
+    } = req.body || {};
+
+    if (!Number(amount) || Number(amount) < 1) {
+      return res.status(400).json({ error: "Invalid amount (in cents)" });
+    }
+
+    // Initialize Stripe *inside* the handler
     const stripe = new Stripe(key, { apiVersion: "2024-06-20" });
 
-    const { email = "", name = "", phone = "", amount = 5000, currency = "usd" } = req.body || {};
-
-    // (optional) upsert a customer
+    // (Optional) upsert a customer so you keep leads if they abandon
     let customerId;
     if (email) {
       const existing = await stripe.customers.list({ email, limit: 1 });
@@ -46,13 +61,18 @@ export default async function handler(req, res) {
       }
     }
 
+    // Create the PaymentIntent for Payment Element
     const pi = await stripe.paymentIntents.create({
-      amount,
-      currency,
+      amount: Number(amount),
+      currency: String(currency).toLowerCase(),
       customer: customerId,
       automatic_payment_methods: { enabled: true },
       receipt_email: email || undefined,
-      metadata: { email, name, phone, source: "framer" },
+      metadata: {
+        email, name, phone,
+        productId, productName, image,
+        source: "framer-payment-element",
+      },
     });
 
     return res.status(200).json({ clientSecret: pi.client_secret });
