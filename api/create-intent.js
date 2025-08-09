@@ -35,3 +35,16 @@ export default async function handler(req, res) {
     res.status(400).json({ error: err.message });
   }
 }
+// TEMP DEBUG — remove later
+export default async function handler(req, res) {
+  if (req.method === "GET") {
+    return res.status(200).json({
+      ok: true,
+      hasKey: !!process.env.STRIPE_SECRET_KEY,
+      // mode is safe to reveal; it doesn't leak the key
+      mode: process.env.STRIPE_SECRET_KEY?.startsWith("sk_live_") ? "live" : "test",
+    })
+  }
+
+  // ... your existing POST code ...
+}
