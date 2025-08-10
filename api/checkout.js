@@ -15,7 +15,7 @@ export default async function handler(req, res) {
   const key = process.env.STRIPE_SECRET_KEY || "";
   const stripe = key ? new Stripe(key, { apiVersion: "2024-06-20" }) : null;
 
-  // --- DEBUG: GET /api/checkout?debug=1 ---
+  // Debug health check
   if (req.method === "GET" && req.query && req.query.debug === "1") {
     return res.status(200).json({
       ok: true,
@@ -46,7 +46,7 @@ export default async function handler(req, res) {
       returnUrl = "https://your-site.com/thank-you",
     } = req.body || {};
 
-    // ---- 1) Resolve a Price ----
+    // 1) Resolve a Price
     let price;
     if (priceId) {
       price = await stripe.prices.retrieve(priceId);
@@ -67,7 +67,18 @@ export default async function handler(req, res) {
 
     if (!price) return res.status(400).json({ error: "No active price found" });
 
-    // ---- 2) Upsert Customer (optional but helpful) ----
+    // Build a priceSummary we can show in Framer
+    const priceSummary = {
+      amount: price.unit_amount || null,              // in cents
+      currency: price.currency || "usd",
+      type: price.recurring ? "recurring" : "one_time",
+      interval: price.recurring?.interval || null,
+      interval_count: price.recurring?.interval_count || null,
+      priceId: price.id,
+      productId: price.product,
+    };
+
+    // 2) Upsert Customer (optional but helpful)
     let customerId;
     if (email) {
       const existing = await stripe.customers.list({ email, limit: 1 });
@@ -76,7 +87,7 @@ export default async function handler(req, res) {
         : (await stripe.customers.create({ email, name, phone })).id;
     }
 
-    // ---- 3) Branch by price type ----
+    // 3) Branch by price type
     if (price.recurring) {
       // Subscription via Checkout
       const session = await stripe.checkout.sessions.create({
@@ -87,9 +98,13 @@ export default async function handler(req, res) {
         success_url: successUrl + "?session_id={CHECKOUT_SESSION_ID}",
         cancel_url: cancelUrl,
         allow_promotion_codes: true,
-        metadata: { source: "framer-unified", email, name, phone, priceId: price.id, productId: price.product },
+        metadata: {
+          source: "framer-unified",
+          email, name, phone,
+          priceId: price.id, productId: price.product,
+        },
       });
-      return res.status(200).json({ mode: "subscription", url: session.url });
+      return res.status(200).json({ mode: "subscription", url: session.url, priceSummary });
     }
 
     // One-time via Payment Element
@@ -103,10 +118,19 @@ export default async function handler(req, res) {
       customer: customerId,
       automatic_payment_methods: { enabled: true },
       receipt_email: email || undefined,
-      metadata: { source: "framer-unified", email, name, phone, priceId: price.id, productId: price.product },
+      metadata: {
+        source: "framer-unified",
+        email, name, phone,
+        priceId: price.id, productId: price.product,
+      },
     });
 
-    return res.status(200).json({ mode: "payment", clientSecret: pi.client_secret, returnUrl });
+    return res.status(200).json({
+      mode: "payment",
+      clientSecret: pi.client_secret,
+      returnUrl,
+      priceSummary,
+    });
   } catch (err) {
     return res.status(400).json({ error: err.message });
   }
