@@ -3,7 +3,7 @@ import Stripe from "stripe";
 export const config = { runtime: "nodejs" };
 
 function cors(res) {
-  res.setHeader("Access-Control-Allow-Origin", "*"); // lock to your domain later
+  res.setHeader("Access-Control-Allow-Origin", "*"); // TODO: lock to your domain
   res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS,GET");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 }
@@ -13,24 +13,34 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(200).end();
 
   const key = process.env.STRIPE_SECRET_KEY || "";
-  if (req.method === "GET") {
-    // Health check
-    return res.status(200).json({ ok: true, hasKey: !!key });
+  const stripe = key ? new Stripe(key, { apiVersion: "2024-06-20" }) : null;
+
+  // --- DEBUG: GET /api/checkout?debug=1 ---
+  if (req.method === "GET" && req.query && req.query.debug === "1") {
+    return res.status(200).json({
+      ok: true,
+      env: process.env.VERCEL_ENV || "unknown",
+      hasKey: !!key,
+      keyPrefix: key ? key.slice(0, 7) : null, // "sk_test" or "sk_live"
+      time: new Date().toISOString(),
+    });
   }
+
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+  if (!stripe) return res.status(400).json({ error: "Stripe key missing on server" });
 
   try {
-    const stripe = new Stripe(key, { apiVersion: "2024-06-20" });
-
     const {
       // identifiers
-      priceId,                // optional
-      productId,              // optional (we'll use product.default_price when available)
-      // customer/lead
+      priceId,
+      productId,
+
+      // lead/customer (optional)
       email = "",
       name = "",
       phone = "",
-      // URLs
+
+      // urls
       successUrl = "https://your-site.com/success",
       cancelUrl = "https://your-site.com/cancel",
       returnUrl = "https://your-site.com/thank-you",
@@ -43,11 +53,11 @@ export default async function handler(req, res) {
     } else if (productId) {
       const product = await stripe.products.retrieve(productId);
       if (product.default_price) {
-        price = await stripe.prices.retrieve(
-          typeof product.default_price === "string" ? product.default_price : product.default_price.id
-        );
+        const id = typeof product.default_price === "string"
+          ? product.default_price
+          : product.default_price.id;
+        price = await stripe.prices.retrieve(id);
       } else {
-        // fallback: grab the first active price on the product
         const list = await stripe.prices.list({ product: productId, active: true, limit: 1 });
         price = list.data[0];
       }
@@ -57,7 +67,7 @@ export default async function handler(req, res) {
 
     if (!price) return res.status(400).json({ error: "No active price found" });
 
-    // ---- 2) Upsert a Customer (handy for lead capture) ----
+    // ---- 2) Upsert Customer (optional but helpful) ----
     let customerId;
     if (email) {
       const existing = await stripe.customers.list({ email, limit: 1 });
@@ -67,8 +77,8 @@ export default async function handler(req, res) {
     }
 
     // ---- 3) Branch by price type ----
-    // Recurring price => Subscription (via Checkout Session)
     if (price.recurring) {
+      // Subscription via Checkout
       const session = await stripe.checkout.sessions.create({
         mode: "subscription",
         line_items: [{ price: price.id, quantity: 1 }],
@@ -82,7 +92,7 @@ export default async function handler(req, res) {
       return res.status(200).json({ mode: "subscription", url: session.url });
     }
 
-    // One-time price => Payment Element (PaymentIntent)
+    // One-time via Payment Element
     if (!price.unit_amount || !price.currency) {
       return res.status(400).json({ error: "Price must have unit_amount and currency" });
     }
